@@ -29,13 +29,13 @@
 #define _LORA_RF95_
 
 #include "main.h"
-#include "spi.h"
+//#include "spi.h"
 #include "stm32l4xx_hal_def.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
-#include "Useful_Functions.h"
+//#include "Useful_Functions.h"
 
 //Modifiers for read and send
 #define W	0x80
@@ -282,6 +282,8 @@ bool RF95_setModemConfig(ModemConfigChoice index);
 void RF95_setPreambleLength(uint16_t bytes);
 void RF95_setTxPower(int8_t power, bool useRFO);
 bool RF95_setFrequency(float centre);
+uint32_t RF95_ReadFrequencyHz(void);
+void RF95_DebugSnapshot(const char* tag);
 
 //=====Send and receive=====//
 bool RF95_receive(uint8_t* buf);

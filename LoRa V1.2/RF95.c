@@ -23,58 +23,73 @@ HAL_StatusTypeDef err;
 HAL_StatusTypeDef RF95_write(char reg, char wValue)
 {
 	char buff[2]={0};
-	
+
 	buff[0] = W | reg;
 	buff[1] = wValue;
 
 	HAL_GPIO_WritePin(LoRa_CS_GPIO_Port, LoRa_CS_Pin, GPIO_PIN_RESET);
 	err = HAL_SPI_Transmit(&hspi1, (uint8_t*)&buff, 2, 100);
 	HAL_GPIO_WritePin(LoRa_CS_GPIO_Port, LoRa_CS_Pin, GPIO_PIN_SET);
-	
+
 	return err;
 }
 
 
 HAL_StatusTypeDef RF95_write_burst(char reg, uint8_t* data)
 {
-	int length = 0;
+	int length = strlen((const char*)data);
 	uint8_t cmd = W | reg;
 	HAL_StatusTypeDef err;
-	
-	length = strlen((const char*)data);
-	
+
 	HAL_GPIO_WritePin(LoRa_CS_GPIO_Port, LoRa_CS_Pin, GPIO_PIN_RESET);
 	HAL_SPI_Transmit(&hspi1, (uint8_t*)&cmd, 1, 100);
-	err = HAL_SPI_Transmit(&hspi1, (uint8_t*)&LoRa_buff, length, 100);
+	err = HAL_SPI_Transmit(&hspi1, data, length, 100);
 	HAL_GPIO_WritePin(LoRa_CS_GPIO_Port, LoRa_CS_Pin, GPIO_PIN_SET);
-	
+
 	return err;
 }
 
 
 char RF95_read(char reg)
 {
-	char buff = R & reg;
+	//char buff = R & reg;
+
+	uint8_t tx[2];
+	uint8_t rx[2];
+
+	tx[0] = R & reg;
+	tx[1] = 0x00;
 
 	HAL_GPIO_WritePin(LoRa_CS_GPIO_Port, LoRa_CS_Pin, GPIO_PIN_RESET);
-	HAL_SPI_Transmit(&hspi1, (uint8_t*)&buff, 1, 100);
-	HAL_SPI_Receive(&hspi1, (uint8_t*)&buff, 1, 100);
+//	HAL_SPI_Transmit(&hspi1, (uint8_t*)&buff, 1, 100);
+//	HAL_SPI_Receive(&hspi1, (uint8_t*)&buff, 1, 100);
+	HAL_SPI_TransmitReceive(&hspi1, tx, rx, 2, HAL_MAX_DELAY);
 	HAL_GPIO_WritePin(LoRa_CS_GPIO_Port, LoRa_CS_Pin, GPIO_PIN_SET);
-	
-	return buff;
+
+	return rx[1];
 }
 
 
 HAL_StatusTypeDef RF95_read_burst(char reg, char* buffer, int length)
 {
-	buffer[0] = R & reg;
+	uint8_t cmd = R & reg;
 	HAL_StatusTypeDef err;
-	
+
 	HAL_GPIO_WritePin(LoRa_CS_GPIO_Port, LoRa_CS_Pin, GPIO_PIN_RESET);
-	HAL_SPI_Transmit(&hspi1, (uint8_t*)buffer, 1, 100);
-	err = HAL_SPI_Receive(&hspi1, (uint8_t*)buffer, length, 100);
+
+	err = HAL_SPI_Transmit(&hspi1, &cmd, 1, 100);
+	if (err == HAL_OK) {
+		// Clock out 'length' bytes by transmitting dummy 0x00s
+		for (int i = 0; i < length; i++) {
+			uint8_t dummy = 0x00;
+			uint8_t rx = 0x00;
+			err = HAL_SPI_TransmitReceive(&hspi1, &dummy, &rx, 1, 100);
+			if (err != HAL_OK) break;
+			buffer[i] = (char)rx;
+		}
+	}
+
 	HAL_GPIO_WritePin(LoRa_CS_GPIO_Port, LoRa_CS_Pin, GPIO_PIN_SET);
-	
 	return err;
 }
 
@@ -82,8 +97,13 @@ HAL_StatusTypeDef RF95_read_burst(char reg, char* buffer, int length)
 void RF95_Reset(void)
 {
 	HAL_GPIO_WritePin(LoRa_RESET_GPIO_Port, LoRa_RESET_Pin, GPIO_PIN_RESET);
-	HAL_Delay(20);
+	HAL_Delay(10);
 	HAL_GPIO_WritePin(LoRa_RESET_GPIO_Port, LoRa_RESET_Pin, GPIO_PIN_SET);
+	HAL_Delay(10);
+	HAL_GPIO_WritePin(LoRa_RESET_GPIO_Port, LoRa_RESET_Pin, GPIO_PIN_RESET);
+	HAL_Delay(10);
+	HAL_GPIO_WritePin(LoRa_RESET_GPIO_Port, LoRa_RESET_Pin, GPIO_PIN_SET);
+	HAL_Delay(50);
 }
 
 uint8_t rbuff = 0;
@@ -93,7 +113,13 @@ bool RF95_Init(void)
 
 	// Set sleep mode, so we can also set LORA mode:
 	RF95_sleep();
-	
+
+	uint8_t version = RF95_read(RH_RF95_REG_42_VERSION);
+
+	if (version != 0x12) {
+		return false;
+	}
+
     RF95_write(RH_RF95_REG_01_OP_MODE, RH_RF95_MODE_SLEEP | RH_RF95_LONG_RANGE_MODE);
     HAL_Delay(20); // Wait for sleep mode to take over from say, CAD
 
@@ -123,11 +149,38 @@ bool RF95_Init(void)
 	RF95_setModemConfig(Bw125Cr45Sf128); // Radio default
     RF95_setPreambleLength(8); // Default is 8
     // An innocuous ISM frequency, same as RF22's
-    RF95_setFrequency(868.0);
+    RF95_setFrequency(433.0);
+
+    HAL_Delay(10);
+
+    // Double set the freq to exactly 433MHz otherwise it is slightly off center
+    RF95_write(RH_RF95_REG_06_FRF_MSB, 0x6C);
+    RF95_write(RH_RF95_REG_07_FRF_MID, 0x40);
+    RF95_write(RH_RF95_REG_08_FRF_LSB, 0x00);
+
+    HAL_Delay(10);
+    // Double check the frequency sets correctly
+    uint8_t msb = RF95_read(RH_RF95_REG_06_FRF_MSB);
+    uint8_t mid = RF95_read(RH_RF95_REG_07_FRF_MID);
+    uint8_t lsb = RF95_read(RH_RF95_REG_08_FRF_LSB);
+    uint32_t hz = RF95_ReadFrequencyHz();
+
+
     // Lowish power
-    RF95_setTxPower(13, false);
+    RF95_setTxPower(17, false);
 
     return true;
+}
+
+void RF95_DebugSnapshot(const char* tag) {
+	volatile uint8_t op		= RF95_read(RH_RF95_REG_01_OP_MODE);
+	volatile uint8_t irq	= RF95_read(RH_RF95_REG_12_IRQ_FLAGS);
+	volatile uint8_t mask	= RF95_read(RH_RF95_REG_11_IRQ_FLAGS_MASK);
+	volatile uint8_t dio1	= RF95_read(RH_RF95_REG_40_DIO_MAPPING1);
+	volatile uint8_t pa		= RF95_read(RH_RF95_REG_09_PA_CONFIG);
+
+	(void) tag; (void) op; (void) irq; (void) mask; (void) dio1; (void)pa;
+
 }
 
 
@@ -159,6 +212,16 @@ bool RF95_setFrequency(float centre)
     return true;
 }
 
+uint32_t RF95_ReadFrequencyHz(void) {
+	uint32_t frf =
+			((uint32_t)RF95_read(RH_RF95_REG_06_FRF_MSB) << 16) |
+			((uint32_t)RF95_read(RH_RF95_REG_07_FRF_MID) << 8) |
+			((uint32_t)RF95_read(RH_RF95_REG_08_FRF_LSB) << 0);
+
+	uint64_t hz = (uint64_t)frf * 32000000ULL;
+	hz /= 524288ULL;
+	return (uint32_t)hz;
+}
 
 void RF95_setTxPower(int8_t power, bool useRFO)
 {
@@ -202,24 +265,24 @@ void RF95_setTxPower(int8_t power, bool useRFO)
 bool RF95_receive(uint8_t* data)
 {
 	int len = 0;
-	
+
 	if(_mode == RHModeRx)
 	{
 		while(!RF95_available()){}
 
 		if(RF95_Check_PayloadCRCError())
 			return false;
-		
+
 
 		len = RF95_read(RH_RF95_REG_13_RX_NB_BYTES);
 
 		// Reset the fifo read ptr to the beginning of the packet
 		RF95_write(RH_RF95_REG_0D_FIFO_ADDR_PTR, RF95_read(RH_RF95_REG_10_FIFO_RX_CURRENT_ADDR));
-		
-		RF95_read_burst(RH_RF95_REG_00_FIFO, (char*)data, len);	
+
+		RF95_read_burst(RH_RF95_REG_00_FIFO, (char*)data, len);
 
 		RF95_setModeIdle();
-			
+
 		RF95_Clear_IRQ();
 
 		return true;
@@ -264,7 +327,7 @@ bool RF95_receive_Timeout(uint8_t* buf, uint16_t timeout)
 			return true;
 		}
 	}
-	else 
+	else
 		return false;
 }
 
@@ -276,13 +339,13 @@ bool RF95_send(uint8_t* data)
 	#if Header == Header_used
 	uint16_t header_len = sizeof(_txHeaderTo);
 	#endif
-	
+
     if (len > RH_RF95_MAX_MESSAGE_LEN)
 			return false;
 
     RF95_waitPacketSent(); // Make sure we dont interrupt an outgoing message
     RF95_setModeIdle();
-		
+
 	if (!RF95_waitCAD())
 		return false;  // Check channel activity
 
@@ -298,24 +361,38 @@ bool RF95_send(uint8_t* data)
 
     // The message data
     RF95_write_burst(RH_RF95_REG_00_FIFO, data);
-		
+
 	#if Header == No_header
 	RF95_write(RH_RF95_REG_22_PAYLOAD_LENGTH, len);
 	#else
 	RF95_write(RH_RF95_REG_22_PAYLOAD_LENGTH, len + header_len);
 	#endif
-		
+
 //		uint8_t rBuff[15] = {0};
 //		uint16_t lenght_ = RF95_read(RH_RF95_REG_10_FIFO_RX_CURRENT_ADDR);
 //		RF95_write(RH_RF95_REG_0D_FIFO_ADDR_PTR, lenght_);
 //		RF95_read_burst(RH_RF95_REG_00_FIFO,(char*)rBuff, len);
 
+	RF95_Clear_IRQ();
+	RF95_DebugSnapshot("pre-tx");
+
     RF95_setModeTx(); // Start the transmitter
-	while(!RF95_Check_TxDone()){}
-		
+    RF95_DebugSnapshot("tx-start");
+
+    uint32_t t0 = HAL_GetTick();
+	while(!RF95_Check_TxDone()){
+		if (HAL_GetTick() - t0 > 2000) {
+			RF95_DebugSnapshot("tx-timeout");
+			return false;
+		}
+	}
+
+
+	RF95_DebugSnapshot("tx-done");
 	RF95_setModeIdle();
 
 	RF95_Clear_IRQ();
+	RF95_DebugSnapshot("Post-Clear");
     return true;
 }
 
@@ -330,13 +407,13 @@ bool RF95_waitCAD(void)
     // DCF : BackoffTime = random() x aSlotTime
     // 100 - 1000 ms
     // 10 sec timeout
-			
+
 	RF95_setModeCAD();
-		
+
     unsigned long t = HAL_GetTick();
     while (!RF95_Check_CADDone())
     {
-      if (HAL_GetTick() - t > _cad_timeout) 
+      if (HAL_GetTick() - t > _cad_timeout)
 	     return false;
     }
 
@@ -356,10 +433,10 @@ bool RF95_waitPacketSent(void)
 
 
 bool RF95_available(void)
-{	
+{
 	while(!RF95_Check_RxDone())
 	{
-		
+
 	}
 
 	if(RF95_Check_ValidHeader())
@@ -367,7 +444,7 @@ bool RF95_available(void)
 			RF95_Clear_IRQ();
 			return true;
 	}
-	else 
+	else
 		return false;
 }
 
@@ -482,7 +559,7 @@ bool RF95_Check_RxTimeout(void)
 	char reg_read = 0;
 	reg_read = RF95_read(RH_RF95_REG_12_IRQ_FLAGS);
 	reg_read = (reg_read & RH_RF95_RX_TIMEOUT) >> 7;
-	
+
 	return reg_read;
 }
 
@@ -492,7 +569,7 @@ bool RF95_Check_RxDone(void)
 	char reg_read = 0;
 	reg_read = RF95_read(RH_RF95_REG_12_IRQ_FLAGS);
 	reg_read = (reg_read & RH_RF95_RX_DONE) >> 6;
-	
+
 	return reg_read;
 }
 
@@ -502,7 +579,7 @@ bool RF95_Check_PayloadCRCError(void)
 	char reg_read = 0;
 	reg_read = RF95_read(RH_RF95_REG_12_IRQ_FLAGS);
 	reg_read = (reg_read & RH_RF95_PAYLOAD_CRC_ERROR) >> 5;
-	
+
 	return reg_read;
 }
 
@@ -511,7 +588,7 @@ bool RF95_Check_ValidHeader(void)
 {
 	char reg_read = 0;
 	reg_read = RF95_read(RH_RF95_REG_12_IRQ_FLAGS);
-	
+
 	reg_read = (reg_read & RH_RF95_VALID_HEADER) >> 4;
 
 	return reg_read;
@@ -522,7 +599,7 @@ bool RF95_Check_TxDone(void)
 {
 	char reg_read = 0;
 	reg_read = RF95_read(RH_RF95_REG_12_IRQ_FLAGS);
-	
+
 	reg_read = (reg_read & RH_RF95_TX_DONE) >> 3;
 
 	return reg_read;
@@ -543,7 +620,7 @@ bool RF95_Check_FhssChannelChange(void)
 	char reg_read = 0;
 	reg_read = RF95_read(RH_RF95_REG_12_IRQ_FLAGS);
 	reg_read = (reg_read & RH_RF95_FHSS_CHANGE_CHANNEL) >> 1;
-	
+
 	return reg_read;
 }
 
@@ -553,7 +630,7 @@ bool RF95_Check_CADDetect(void)
 	char reg_read = 0;
 	reg_read = RF95_read(RH_RF95_REG_12_IRQ_FLAGS);
 	reg_read = (reg_read & RH_RF95_CAD_DETECTED);
-	
+
 	return reg_read;
 }
 
@@ -561,9 +638,9 @@ bool RF95_Check_CADDetect(void)
 void RF95_Clear_IRQ(void)
 {
 	uint8_t irq_flags = 0;
-	
+
 	RF95_write(RH_RF95_REG_12_IRQ_FLAGS, 0xFF);
-	
+
 	irq_flags = RF95_read(RH_RF95_REG_12_IRQ_FLAGS);
 	if(irq_flags != 0)
 		RF95_write(RH_RF95_REG_12_IRQ_FLAGS, 0xFF);
@@ -575,7 +652,7 @@ bool RF95_Check_ModemClear(void)
 	char reg_read = 0;
 	reg_read = RF95_read(RH_RF95_REG_18_MODEM_STAT);
 	reg_read = (reg_read & RH_RF95_MODEM_STATUS_CLEAR) >> 4;
-	
+
 	return reg_read;
 }
 
@@ -604,7 +681,7 @@ bool RF95_Check_SignalSyncronized(void)
 	char reg_read = 0;
 	reg_read = RF95_read(RH_RF95_REG_18_MODEM_STAT);
 	reg_read = (reg_read & RH_RF95_MODEM_STATUS_SIGNAL_SYNCHRONIZED) >> 1;
-	
+
 	return reg_read;
 }
 
@@ -614,7 +691,7 @@ bool RF95_Check_SignalDetect(void)
 	char reg_read = 0;
 	reg_read = RF95_read(RH_RF95_REG_18_MODEM_STAT);
 	reg_read = (reg_read & RH_RF95_MODEM_STATUS_SIGNAL_DETECTED);
-	
+
 	return reg_read;
 }
 
@@ -698,11 +775,12 @@ bool RF95_Master_Receive_from_Node(uint16_t node)
 	do
 	{
 		Clear_Buffer(LoRa_buff);
-		Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+		//Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);  // USED FOR LED FEEDBACK.
+
 		HAL_Delay(2000);	//Wait to give time to the slave to change to receive mode
 		strcpy((char*)LoRa_buff, (char*)command);
 		RF95_send(LoRa_buff);		//Send the request "?x"
-		Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+		//Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
 
 		while(strcmp((char*)LoRa_buff, (char*)ACK_command) != 0)
 		{
@@ -710,12 +788,12 @@ bool RF95_Master_Receive_from_Node(uint16_t node)
 			Clear_Buffer(LoRa_buff);
 			if(RF95_waitCAD())
 			{
-				Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+				//Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 				RF95_setModeRx_Continuous();
 				error = RF95_receive_Timeout(LoRa_buff, 7000); //Receive an answer and if we doesn't receive it in the time
 															   //we send again the petition.
 				HAL_Delay(1000);
-				Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+				//Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 			}
 		}
 	} while(error == false);
@@ -726,11 +804,11 @@ bool RF95_Master_Receive_from_Node(uint16_t node)
 	//Clear the LoRa buffer used for transactions to prevent errors
 
 	Clear_Buffer(LoRa_buff);
-	Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+	//Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
 	HAL_Delay(3000);	//Wait to give time to the slave to change to receive mode
 	strcpy((char*)LoRa_buff, (char*)ACK_command);
 	RF95_send(LoRa_buff);		//Send the ACK to indicate the slave to send the data
-	Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+	//Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
 	Clear_Buffer(LoRa_buff);
 
 	//Receive the data from the node x
@@ -742,11 +820,11 @@ bool RF95_Master_Receive_from_Node(uint16_t node)
 			Clear_Buffer(LoRa_buff);
 			if(RF95_waitCAD())
 			{
-				Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+				//Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 				RF95_setModeRx_Continuous();
 				error = RF95_receive_Timeout(LoRa_buff, 7000);
 				HAL_Delay(1000);
-				Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+				//Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 
 				if(strcmp((char *)LoRa_buff, (char *)command) == 0)
 				{
@@ -758,22 +836,22 @@ bool RF95_Master_Receive_from_Node(uint16_t node)
 
 			if(strcmp((char*)LoRa_buff, "This is text message!") == 0)
 			{
-				Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
-				Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+				//Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+				//Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 				HAL_Delay(3000);
-				Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
-				Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+				//Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+				//Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 			}
 			/*===============================================================*/
 			if(error == true)
 			{
 				//Send ACK to the node x
 				Clear_Buffer(LoRa_buff);
-				Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+				//Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
 				HAL_Delay(2000);	//Wait to give time to the slave to change to receive mode
 				strcpy((char*)LoRa_buff, (char *)ACK_command); //Send the ACK indicating we want to continue the transmission
 				RF95_send(LoRa_buff);
-				Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+				//Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
 			}
 		} while(error == false);
 	}
@@ -813,13 +891,13 @@ bool RF95_Slave_Send(void)
 		Clear_Buffer(LoRa_buff);
 		if(RF95_waitCAD())
 		{
-			Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+			//Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 			RF95_setModeRx_Continuous();
 			RF95_receive(LoRa_buff);
 		}
 	}
 	HAL_Delay(1000);
-	Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+	//Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 
 
 	//If a receive request has happened from the Master, we send the ACK to tell the master we are going to send as
@@ -827,11 +905,11 @@ bool RF95_Slave_Send(void)
 	do
 	{
 		Clear_Buffer(LoRa_buff);
-		Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+		//Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
 		HAL_Delay(2000);
 		strcpy((char*)LoRa_buff, (char *)ACK_command);
 		RF95_send(LoRa_buff);
-		Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+		//Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
 		Clear_Buffer(LoRa_buff);
 		//Wait until a receive The ACK from master, which tells us to start sending data
 		while(strcmp((char *)LoRa_buff, (char *)ACK_command) != 0)
@@ -840,11 +918,11 @@ bool RF95_Slave_Send(void)
 			Clear_Buffer(LoRa_buff);
 			if(RF95_waitCAD())
 			{
-				Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+				//Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 				RF95_setModeRx_Continuous();
 				error = RF95_receive_Timeout(LoRa_buff, 7000);
 				HAL_Delay(1000);
-				Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+				//Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 			}
 		}
 	} while(error == false);
@@ -855,11 +933,11 @@ bool RF95_Slave_Send(void)
 	{
 		//Send data to the master
 		Clear_Buffer(LoRa_buff);
-		Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+		//Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
 		HAL_Delay(3000);
 		strcpy((char*) LoRa_buff, "This is text message!");
 		RF95_send(LoRa_buff);
-		Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+		//Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
 
 		//Check for ACK
 		Clear_Buffer(LoRa_buff);
@@ -868,11 +946,11 @@ bool RF95_Slave_Send(void)
 			//Receive the data
 			if(RF95_waitCAD())
 			{
-				Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+				//Set_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 				RF95_setModeRx_Continuous();
 				error = RF95_receive_Timeout(LoRa_buff, 7000);
 				HAL_Delay(2000);
-				Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
+				//Reset_Pin(RX_LED_GPIO_Port, RX_LED_Pin);
 			}
 		}
 	} while(error == false);
@@ -881,11 +959,11 @@ bool RF95_Slave_Send(void)
 	/*===============================================================*/
 	//Prepare the command Xx in order to tell the transaction has ended or has to stop
 	Clear_Buffer(LoRa_buff);
-	Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+	//Set_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
 	sprintf((char*)LoRa_buff, "X%d", Node_ID);
 	HAL_Delay(2000);
 	RF95_send(LoRa_buff);
-	Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
+	//Reset_Pin(TX_LED_GPIO_Port, TX_LED_Pin);
 
 	Clear_Buffer(LoRa_buff);
 	return true;
